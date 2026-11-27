@@ -23,9 +23,9 @@ let package = Package(
                 .unsafeFlags(["-fvisibility=hidden"]),
             ],
             linkerSettings: [
-                .linkedFramework("Metal", .when(platforms: [.iOS])),
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
                 .linkedFramework("MetalKit", .when(platforms: [.iOS])),
-                .linkedFramework("QuartzCore", .when(platforms: [.iOS])),
                 .linkedFramework("UIKit", .when(platforms: [.iOS])),
                 .linkedLibrary("c++"),
             ]
