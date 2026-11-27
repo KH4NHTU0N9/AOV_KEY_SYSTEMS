@@ -10,14 +10,19 @@ from config import get_db_path
 
 
 @contextmanager
-def get_conn() -> Iterator[sqlite3.Connection]:
+def get_conn(immediate: bool = False) -> Iterator[sqlite3.Connection]:
     """Open a SQLite connection with row dict factory and WAL mode."""
     conn = sqlite3.connect(get_db_path(), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    if immediate:
+        conn.execute("BEGIN IMMEDIATE;")
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -95,13 +100,16 @@ def create_keys(
     max_devices: int = 1,
     note: str = "",
     activate_on_first_use: bool = True,
+    initial_device_id: str = "",
 ) -> list[dict[str, Any]]:
     """Create one or more license keys in SQLite."""
     now = int(time.time())
     expires_at = None if activate_on_first_use else now + (duration_hours * 3600)
+    clean_dev = initial_device_id.strip()
+    initial_bound = json.dumps([clean_dev]) if clean_dev else "[]"
     created: list[dict[str, Any]] = []
 
-    with get_conn() as conn:
+    with get_conn(immediate=True) as conn:
         for _ in range(count):
             for _attempt in range(10):
                 key = generate_license_key(prefix)
@@ -111,9 +119,9 @@ def create_keys(
                         INSERT INTO licenses (
                             license_key, note, max_devices, bound_devices,
                             duration_hours, activate_on_first_use, expires_at, created_at
-                        ) VALUES (?, ?, ?, '[]', ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (key, note, max_devices, duration_hours, int(activate_on_first_use), expires_at, now),
+                        (key, note, max_devices, initial_bound, duration_hours, int(activate_on_first_use), expires_at, now),
                     )
                     row = conn.execute("SELECT * FROM licenses WHERE id = ?", (cur.lastrowid,)).fetchone()
                     created.append(_row_to_dict(row, now))
@@ -166,7 +174,7 @@ def verify_and_bind_key(license_key: str, device_id: str, client_ip: str = "") -
     if not key or not dev:
         return False, 400, "License key and device ID are required", None
 
-    with get_conn() as conn:
+    with get_conn(immediate=True) as conn:
         row = conn.execute("SELECT * FROM licenses WHERE license_key = ?", (key,)).fetchone()
         if not row:
             _log_verify(conn, key, dev, client_ip, "denied", "Key not found", now)

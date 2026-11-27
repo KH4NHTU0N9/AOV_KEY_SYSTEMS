@@ -9,6 +9,7 @@ scripts/__pycache__/
 # Swift build artifacts
 ios-sdk/.build/
 ios-sdk/.derivedData/
+ios-sdk/Sources/KTImGuiOverlay/Vendor/
 dist/
 *.zip
 *.ipa

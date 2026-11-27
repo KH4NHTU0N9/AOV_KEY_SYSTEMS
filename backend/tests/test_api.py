@@ -111,3 +111,38 @@ def test_expired_key_and_admin_auth(client: TestClient):
     v = client.post("/api/v1/verify", json={"key": key, "device_id": "DEV-999", "nonce": "n-exp"})
     assert v.status_code == 403
     assert "expired" in v.json()["error"].lower()
+
+
+def test_initial_device_id_and_admin_xss_escaping(client: TestClient):
+    headers = {"X-Admin-Token": "test-secret-token"}
+    res = client.post(
+        "/api/admin/keys",
+        headers=headers,
+        json={
+            "count": 1,
+            "duration_hours": 24,
+            "max_devices": 1,
+            "note": "<img src=x onerror=alert(1)>",
+            "initial_device_id": "BOUND-DEV-001",
+        },
+    )
+    assert res.status_code == 200
+    created = res.json()["created"][0]
+    assert created["bound_devices"] == ["BOUND-DEV-001"]
+
+    bad_dev = client.post(
+        "/api/v1/verify",
+        json={"key": created["license_key"], "device_id": "OTHER-DEV-002", "nonce": "n-bound"},
+    )
+    assert bad_dev.status_code == 403
+
+    good_dev = client.post(
+        "/api/v1/verify",
+        json={"key": created["license_key"], "device_id": "BOUND-DEV-001", "nonce": "n-bound2"},
+    )
+    assert good_dev.status_code == 200
+
+    admin_html = (BACKEND_DIR / "static" / "admin.html").read_text(encoding="utf-8")
+    assert "function escHtml" in admin_html
+    assert "data-act=" in admin_html
+    assert "onclick=\"copyText" not in admin_html

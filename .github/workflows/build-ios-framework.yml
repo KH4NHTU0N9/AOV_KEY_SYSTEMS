@@ -29,6 +29,23 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer || true
           xcodebuild -version
 
+      - name: Fetch pinned Dear ImGui v1.91.9b sources
+        run: |
+          git clone --depth 1 --branch v1.91.9b https://github.com/ocornut/imgui.git /tmp/imgui-src
+          (cd /tmp/imgui-src && git rev-parse HEAD | grep -q "^f5befd2d29e66809cd1110a152e375a7f1981f06$")
+          DEST="ios-sdk/Sources/KTImGuiOverlay/Vendor/imgui"
+          mkdir -p "$DEST/backends"
+          cp /tmp/imgui-src/imgui.h /tmp/imgui-src/imconfig.h /tmp/imgui-src/imgui_internal.h \
+             /tmp/imgui-src/imstb_rectpack.h /tmp/imgui-src/imstb_textedit.h /tmp/imgui-src/imstb_truetype.h \
+             /tmp/imgui-src/imgui.cpp /tmp/imgui-src/imgui_draw.cpp /tmp/imgui-src/imgui_tables.cpp \
+             /tmp/imgui-src/imgui_widgets.cpp "$DEST/"
+          cp /tmp/imgui-src/backends/imgui_impl_metal.h /tmp/imgui-src/backends/imgui_impl_metal.mm "$DEST/backends/"
+
+      - name: Run KeyAuthSDK Swift unit tests
+        run: |
+          cd ios-sdk
+          swift test --filter KeyAuthSDKTests
+
       - name: Build KeyAuthSDK for iOS (arm64)
         run: |
           cd ios-sdk
@@ -54,12 +71,13 @@ jobs:
             cp "$PROD/libKeyAuthSDK.dylib" dist/KeyAuthSDK.framework/KeyAuthSDK
           elif [ -f "$PROD/KeyAuthSDK.o" ]; then
             echo "Found object output; linking dynamic framework..."
-            clang -arch arm64 -dynamiclib \
+            clang++ -arch arm64 -std=c++17 -fvisibility=hidden -dynamiclib \
               -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
               -miphoneos-version-min=14.0 \
               -install_name @rpath/KeyAuthSDK.framework/KeyAuthSDK \
               -framework Foundation -framework UIKit -framework Security -framework CryptoKit \
-              -lobjc \
+              -framework Metal -framework MetalKit -framework QuartzCore \
+              -lobjc -lc++ \
               "$PROD"/*.o \
               -o dist/KeyAuthSDK.framework/KeyAuthSDK
           else
@@ -73,9 +91,10 @@ jobs:
 
           install_name_tool -id @rpath/KeyAuthSDK.framework/KeyAuthSDK dist/KeyAuthSDK.framework/KeyAuthSDK
           codesign -f -s - dist/KeyAuthSDK.framework
+          codesign -v --strict dist/KeyAuthSDK.framework
           file dist/KeyAuthSDK.framework/KeyAuthSDK
           otool -L dist/KeyAuthSDK.framework/KeyAuthSDK
-          nm -gU dist/KeyAuthSDK.framework/KeyAuthSDK | grep -E "KeyAuthGate|KeyAuthLoader" || true
+          nm -gU dist/KeyAuthSDK.framework/KeyAuthSDK | grep -E "KeyAuthGate|KeyAuthLoader|KTImGuiOverlay"
 
           cd dist && zip -r ../KeyAuthSDK.framework.zip KeyAuthSDK.framework
 

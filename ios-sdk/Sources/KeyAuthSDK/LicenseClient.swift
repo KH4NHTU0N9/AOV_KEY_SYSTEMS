@@ -15,10 +15,11 @@ public struct LicensePayload: Codable, Equatable {
 }
 
 private struct VerifyAPIResponse: Decodable {
-    let status: String
+    let status: String?
     let payload_raw: String?
     let signature: String?
     let error: String?
+    let detail: String?
 }
 
 public enum LicenseError: Error, LocalizedError, Equatable {
@@ -26,6 +27,7 @@ public enum LicenseError: Error, LocalizedError, Equatable {
     case networkError(String)
     case serverRejected(String)
     case invalidSignature
+    case keyMismatch
     case nonceMismatch
     case deviceMismatch
     case expired
@@ -36,6 +38,7 @@ public enum LicenseError: Error, LocalizedError, Equatable {
         case .networkError(let msg): return "Network error: \(msg)"
         case .serverRejected(let msg): return msg
         case .invalidSignature: return "Response signature verification failed."
+        case .keyMismatch: return "License key in signed payload does not match."
         case .nonceMismatch: return "Security challenge (nonce) mismatch."
         case .deviceMismatch: return "License is bound to another device."
         case .expired: return "License key has expired."
@@ -62,12 +65,37 @@ public final class LicenseClient {
         self.session = session
     }
 
+    /// Normalizes a configured Get-Key portal URL and appends `?code=<deviceID>`.
+    public static func normalizeGetKeyURL(_ raw: String?, deviceID: String) -> URL? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              var comps = URLComponents(string: trimmed),
+              let scheme = comps.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let host = comps.host, !host.isEmpty else {
+            return nil
+        }
+        var path = comps.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if path.isEmpty || path == "get-key" {
+            comps.path = "/get-key/"
+        } else {
+            path += path.hasSuffix("/get-key") ? "/" : "/get-key/"
+            comps.path = "/" + path
+        }
+        var items = comps.queryItems ?? []
+        items.removeAll { $0.name == "code" }
+        items.append(URLQueryItem(name: "code", value: deviceID))
+        comps.queryItems = items
+        return comps.url
+    }
+
     /// Validates an Ed25519-signed response offline against the pinned public key.
     public func validateSignedResponse(
         payloadRaw: String,
         signatureBase64: String,
         expectedNonce: String,
         expectedDeviceID: String,
+        expectedKey: String? = nil,
         now: TimeInterval = Date().timeIntervalSince1970
     ) -> Result<LicensePayload, LicenseError> {
         guard let pubKeyData = Data(base64Encoded: publicKeyBase64),
@@ -84,6 +112,12 @@ public final class LicenseClient {
 
         guard decoded.status == "ok" else {
             return .failure(.serverRejected("License rejected"))
+        }
+        if let expectedKey, decoded.key != expectedKey {
+            return .failure(.keyMismatch)
+        }
+        guard decoded.issued_at <= now + 300 else {
+            return .failure(.invalidSignature)
         }
         guard decoded.nonce == expectedNonce else {
             return .failure(.nonceMismatch)
@@ -128,20 +162,32 @@ public final class LicenseClient {
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        session.dataTask(with: request) { data, _, err in
+        session.dataTask(with: request) { data, response, err in
             if let err {
                 DispatchQueue.main.async { completion(.failure(.networkError(err.localizedDescription))) }
                 return
             }
-            guard let data,
-                  let apiResp = try? JSONDecoder().decode(VerifyAPIResponse.self, from: data) else {
-                DispatchQueue.main.async { completion(.failure(.networkError("Malformed server response"))) }
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if statusCode >= 500 {
+                DispatchQueue.main.async { completion(.failure(.networkError("Server error (HTTP \(statusCode))"))) }
+                return
+            }
+            guard let data else {
+                DispatchQueue.main.async { completion(.failure(.networkError("Empty server response"))) }
+                return
+            }
+            if statusCode == 422 {
+                DispatchQueue.main.async { completion(.failure(.serverRejected("Invalid key format or device ID."))) }
+                return
+            }
+            guard let apiResp = try? JSONDecoder().decode(VerifyAPIResponse.self, from: data) else {
+                DispatchQueue.main.async { completion(.failure(.networkError("Malformed server response (HTTP \(statusCode))"))) }
                 return
             }
             guard apiResp.status == "ok",
                   let payloadRaw = apiResp.payload_raw,
                   let signature = apiResp.signature else {
-                let msg = apiResp.error ?? "Invalid license key"
+                let msg = apiResp.error ?? apiResp.detail ?? "Invalid license key"
                 DispatchQueue.main.async { completion(.failure(.serverRejected(msg))) }
                 return
             }
@@ -150,7 +196,8 @@ public final class LicenseClient {
                 payloadRaw: payloadRaw,
                 signatureBase64: signature,
                 expectedNonce: nonce,
-                expectedDeviceID: resolvedDevice
+                expectedDeviceID: resolvedDevice,
+                expectedKey: trimmedKey
             )
             if case .success = validation {
                 KeychainStore.saveLicenseKey(trimmedKey, service: self.serviceName)
@@ -165,10 +212,13 @@ public final class LicenseClient {
         in window: UIWindow,
         title: String = "KT AOV License",
         subtitle: String = "Enter your activation key to continue",
+        getKeyURLRaw: String? = nil,
         onAuthorized: @escaping (LicensePayload) -> Void
     ) {
+        let devID = KeychainStore.getOrCreateDeviceID(service: serviceName)
+        let resolvedGetKeyURL = Self.normalizeGetKeyURL(getKeyURLRaw, deviceID: devID)
         if let saved = KeychainStore.savedLicenseKey(service: serviceName) {
-            verify(key: saved) { [weak window] result in
+            verify(key: saved, deviceID: devID) { [weak window] result in
                 guard let window else { return }
                 switch result {
                 case .success(let payload):
@@ -183,6 +233,7 @@ public final class LicenseClient {
                         in: window,
                         title: title,
                         subtitle: subtitle,
+                        getKeyURL: resolvedGetKeyURL,
                         prefillKey: saved,
                         initialError: error.localizedDescription,
                         onAuthorized: onAuthorized
@@ -194,6 +245,7 @@ public final class LicenseClient {
                 in: window,
                 title: title,
                 subtitle: subtitle,
+                getKeyURL: resolvedGetKeyURL,
                 prefillKey: nil,
                 initialError: nil,
                 onAuthorized: onAuthorized
@@ -205,6 +257,7 @@ public final class LicenseClient {
         in window: UIWindow,
         title: String,
         subtitle: String,
+        getKeyURL: URL?,
         prefillKey: String?,
         initialError: String?,
         onAuthorized: @escaping (LicensePayload) -> Void
@@ -217,6 +270,7 @@ public final class LicenseClient {
                         in: window,
                         title: title,
                         subtitle: subtitle,
+                        getKeyURL: getKeyURL,
                         prefillKey: prefillKey,
                         initialError: initialError,
                         onAuthorized: onAuthorized
@@ -231,6 +285,7 @@ public final class LicenseClient {
                 client: self,
                 titleText: title,
                 subtitleText: subtitle,
+                getKeyURL: getKeyURL,
                 prefillKey: prefillKey,
                 initialError: initialError,
                 onAuthorized: onAuthorized

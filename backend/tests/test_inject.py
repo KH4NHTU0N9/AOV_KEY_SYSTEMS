@@ -60,3 +60,70 @@ def test_inject_load_dylib_and_plist(tmp_path: Path):
     assert plist_data["KeyAuthServerURL"] == "https://auth.example.com"
     assert plist_data["KeyAuthPublicKey"] == "PUBKEY_B64"
     assert plist_data["KeyAuthTitle"] == "KT AOV"
+    assert "KeyAuthGetKeyURL" not in plist_data
+
+
+def test_build_standalone_unity_ipa_preserves_exec_bits_and_getkey_url(tmp_path: Path):
+    import plistlib
+    import zipfile
+
+    app_root = tmp_path / "Payload" / "TestGame.app"
+    unity_dir = app_root / "Frameworks" / "UnityFramework.framework"
+    unity_dir.mkdir(parents=True)
+    app_root.joinpath("Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleExecutable": "TestGame", "CFBundleIdentifier": "com.test.game"})
+    )
+    main_bin = app_root / "TestGame"
+    main_bin.write_bytes(_make_minimal_macho64())
+    main_bin.chmod(0o755)
+
+    unity_bin = unity_dir / "UnityFramework"
+    unity_bin.write_bytes(_make_minimal_macho64())
+    unity_bin.chmod(0o755)
+
+    ipa_in = tmp_path / "clean_in.ipa"
+
+    # Build clean zip containing only Payload/
+    stage_in = tmp_path / "stage_in"
+    (stage_in / "Payload").mkdir(parents=True)
+    import shutil
+    shutil.copytree(app_root, stage_in / "Payload" / "TestGame.app")
+    inject_ipa._write_zip_preserving_attrs(stage_in, ipa_in)
+
+    fw_in = tmp_path / "KeyAuthSDK.framework"
+    fw_in.mkdir()
+    fw_bin = fw_in / "KeyAuthSDK"
+    fw_bin.write_bytes(_make_minimal_macho64())
+    fw_bin.chmod(0o755)
+
+    ipa_out = tmp_path / "patched_out.ipa"
+    inject_ipa.build_ipa(
+        ipa_path=ipa_in,
+        framework_path=fw_in,
+        server_url="https://auth.ktaov.vn/",
+        public_key="PUBKEY_B64",
+        out_path=ipa_out,
+        get_key_url="https://get.ktaov.vn/",
+        target_mode="unity",
+        allow_http=True,
+        enable_120hz=True,
+        sign=False,
+    )
+
+    with zipfile.ZipFile(ipa_out, "r") as zf:
+        names = set(zf.namelist())
+        assert "Payload/TestGame.app/Frameworks/KeyAuthSDK.framework/KeyAuthSDK" in names
+        assert "_fw_unzip" not in " ".join(names)
+
+        fw_info = plistlib.loads(zf.read("Payload/TestGame.app/Frameworks/KeyAuthSDK.framework/Info.plist"))
+        assert fw_info["KeyAuthGetKeyURL"] == "https://get.ktaov.vn"
+
+        app_info = plistlib.loads(zf.read("Payload/TestGame.app/Info.plist"))
+        assert app_info["NSAppTransportSecurity"]["NSAllowsArbitraryLoads"] is True
+        assert app_info["CADisableMinimumFrameDurationOnPhone"] is True
+
+        exec_info = zf.getinfo("Payload/TestGame.app/TestGame")
+        assert (exec_info.external_attr >> 16) & 0o111 == 0o111
+
+        patched_unity = zf.read("Payload/TestGame.app/Frameworks/UnityFramework.framework/UnityFramework")
+        assert b"KeyAuthSDK.framework/KeyAuthSDK" in patched_unity

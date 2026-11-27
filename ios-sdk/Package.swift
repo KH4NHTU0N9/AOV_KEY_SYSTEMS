@@ -9,15 +9,33 @@ let package = Package(
         .macOS(.v12)
     ],
     products: [
-        .library(name: "KeyAuthSDK", type: .dynamic, targets: ["KeyAuthSDK", "KeyAuthBridge"])
+        .library(name: "KeyAuthSDK", type: .dynamic, targets: ["KeyAuthSDK", "KeyAuthBridge", "KTImGuiOverlay"])
     ],
     targets: [
         .target(name: "KeyAuthSDK"),
         .target(
+            name: "KTImGuiOverlay",
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .headerSearchPath("Vendor/imgui"),
+                .headerSearchPath("Vendor/imgui/backends"),
+                .define("IMGUI_DISABLE_OBSOLETE_FUNCTIONS"),
+                .unsafeFlags(["-fvisibility=hidden"]),
+            ],
+            linkerSettings: [
+                .linkedFramework("Metal", .when(platforms: [.iOS])),
+                .linkedFramework("MetalKit", .when(platforms: [.iOS])),
+                .linkedFramework("QuartzCore", .when(platforms: [.iOS])),
+                .linkedFramework("UIKit", .when(platforms: [.iOS])),
+                .linkedLibrary("c++"),
+            ]
+        ),
+        .target(
             name: "KeyAuthBridge",
-            dependencies: ["KeyAuthSDK"],
+            dependencies: ["KeyAuthSDK", "KTImGuiOverlay"],
             publicHeadersPath: "include"
         ),
         .testTarget(name: "KeyAuthSDKTests", dependencies: ["KeyAuthSDK"])
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

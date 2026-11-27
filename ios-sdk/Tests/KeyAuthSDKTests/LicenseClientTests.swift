@@ -89,5 +89,20 @@ final class LicenseClientTests: XCTestCase {
             client.validateSignedResponse(payloadRaw: raw, signatureBase64: sig, expectedNonce: "n1", expectedDeviceID: "DEV-001", now: now + 500),
             .failure(.expired)
         )
+        XCTAssertEqual(
+            client.validateSignedResponse(payloadRaw: raw, signatureBase64: sig, expectedNonce: "n1", expectedDeviceID: "DEV-001", expectedKey: "OTHER-KEY", now: now),
+            .failure(.keyMismatch)
+        )
+    }
+
+    func testNormalizeGetKeyURL() {
+        let u1 = LicenseClient.normalizeGetKeyURL("https://key.ktaov.vn/", deviceID: "DEV-123")
+        XCTAssertEqual(u1?.absoluteString, "https://key.ktaov.vn/get-key/?code=DEV-123")
+
+        let u2 = LicenseClient.normalizeGetKeyURL("https://key.ktaov.vn/get-key", deviceID: "DEV-123")
+        XCTAssertEqual(u2?.absoluteString, "https://key.ktaov.vn/get-key/?code=DEV-123")
+
+        XCTAssertNil(LicenseClient.normalizeGetKeyURL("javascript:alert(1)", deviceID: "DEV-123"))
+        XCTAssertNil(LicenseClient.normalizeGetKeyURL("", deviceID: "DEV-123"))
     }
 }

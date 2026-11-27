@@ -200,6 +200,15 @@
       setTimeout(() => el.style.display = "none", 2400);
     }
 
+    function escHtml(val) {
+      return String(val ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
     function fmtDate(ts) {
       if (!ts) return "Not activated";
       return new Date(ts * 1000).toLocaleString();
@@ -238,45 +247,66 @@
         const data = await api("/api/admin/keys?search=" + q);
         document.getElementById("keyCount").textContent = data.keys.length;
         const tbody = document.getElementById("keysBody");
-        tbody.innerHTML = data.keys.map(k => `
+        tbody.innerHTML = data.keys.map(k => {
+          const safeKey = escHtml(k.license_key);
+          const safeStatus = escHtml(k.computed_status);
+          const safeDevices = escHtml(k.bound_devices.join(", ") || "-");
+          const safeNote = escHtml(k.note || "-");
+          const banBtn = k.is_banned
+            ? `<button class="sec sm" data-act="unban" data-key="${safeKey}">Unban</button>`
+            : `<button class="danger sm" data-act="ban" data-key="${safeKey}">Ban</button>`;
+          return `
           <tr>
-            <td class="mono"><strong>${k.license_key}</strong></td>
-            <td><span class="badge ${k.computed_status}">${k.computed_status}</span></td>
-            <td class="mono">${k.bound_devices.length}/${k.max_devices}<br><span style="color:var(--muted);font-size:0.75rem">${k.bound_devices.join(", ") || "-"}</span></td>
-            <td>${k.duration_hours}h<br><span style="color:var(--muted);font-size:0.75rem">${fmtDate(k.expires_at)}</span></td>
-            <td>${k.note || "-"}</td>
+            <td class="mono"><strong>${safeKey}</strong></td>
+            <td><span class="badge ${safeStatus}">${safeStatus}</span></td>
+            <td class="mono">${Number(k.bound_devices.length)}/${Number(k.max_devices)}<br><span style="color:var(--muted);font-size:0.75rem">${safeDevices}</span></td>
+            <td>${Number(k.duration_hours)}h<br><span style="color:var(--muted);font-size:0.75rem">${escHtml(fmtDate(k.expires_at))}</span></td>
+            <td>${safeNote}</td>
             <td>
               <div class="actions">
-                <button class="sec sm" onclick="copyText('${k.license_key}')">Copy</button>
-                <button class="sec sm" onclick="resetDev('${k.license_key}')">Reset Dev</button>
-                <button class="sec sm" onclick="extendKey('${k.license_key}', 24)">+24h</button>
-                ${k.is_banned
-                  ? `<button class="sec sm" onclick="toggleBan('${k.license_key}', false)">Unban</button>`
-                  : `<button class="danger sm" onclick="toggleBan('${k.license_key}', true)">Ban</button>`}
-                <button class="danger sm" onclick="delKey('${k.license_key}')">Del</button>
+                <button class="sec sm" data-act="copy" data-key="${safeKey}">Copy</button>
+                <button class="sec sm" data-act="reset" data-key="${safeKey}">Reset Dev</button>
+                <button class="sec sm" data-act="extend" data-key="${safeKey}">+24h</button>
+                ${banBtn}
+                <button class="danger sm" data-act="del" data-key="${safeKey}">Del</button>
               </div>
             </td>
-          </tr>
-        `).join("");
+          </tr>`;
+        }).join("");
       } catch (e) {
         toast("Auth error: " + e.message);
       }
     }
 
+    document.getElementById("keysBody").addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-act]");
+      if (!btn) return;
+      const key = btn.getAttribute("data-key") || "";
+      const act = btn.getAttribute("data-act");
+      if (act === "copy") copyText(key);
+      else if (act === "reset") resetDev(key);
+      else if (act === "extend") extendKey(key, 24);
+      else if (act === "ban") toggleBan(key, true);
+      else if (act === "unban") toggleBan(key, false);
+      else if (act === "del") delKey(key);
+    });
+
     async function loadLogs() {
       if (!tokenInput.value.trim()) return;
       try {
         const data = await api("/api/admin/logs?limit=25");
-        document.getElementById("logsBody").innerHTML = data.logs.map(l => `
+        document.getElementById("logsBody").innerHTML = data.logs.map(l => {
+          const ok = l.status === "ok";
+          return `
           <tr>
-            <td>${fmtDate(l.created_at)}</td>
-            <td class="mono">${l.license_key}</td>
-            <td class="mono">${l.device_id}</td>
-            <td class="mono">${l.client_ip || "-"}</td>
-            <td><span class="badge ${l.status === 'ok' ? 'active' : 'banned'}">${l.status}</span></td>
-            <td>${l.message}</td>
-          </tr>
-        `).join("");
+            <td>${escHtml(fmtDate(l.created_at))}</td>
+            <td class="mono">${escHtml(l.license_key)}</td>
+            <td class="mono">${escHtml(l.device_id)}</td>
+            <td class="mono">${escHtml(l.client_ip || "-")}</td>
+            <td><span class="badge ${ok ? 'active' : 'banned'}">${escHtml(l.status)}</span></td>
+            <td>${escHtml(l.message)}</td>
+          </tr>`;
+        }).join("");
       } catch {}
     }
 

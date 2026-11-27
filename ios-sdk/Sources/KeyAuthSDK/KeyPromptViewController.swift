@@ -7,6 +7,7 @@ public final class KeyPromptViewController: UIViewController {
     private let client: LicenseClient
     private let titleText: String
     private let subtitleText: String
+    private let getKeyURL: URL?
     private let prefillKey: String?
     private let initialError: String?
     private let onAuthorized: (LicensePayload) -> Void
@@ -18,12 +19,14 @@ public final class KeyPromptViewController: UIViewController {
     private let errorLabel = UILabel()
     private let submitButton = UIButton(type: .system)
     private let pasteButton = UIButton(type: .system)
+    private let getKeyButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     public init(
         client: LicenseClient,
         titleText: String,
         subtitleText: String,
+        getKeyURL: URL? = nil,
         prefillKey: String? = nil,
         initialError: String? = nil,
         onAuthorized: @escaping (LicensePayload) -> Void
@@ -31,6 +34,7 @@ public final class KeyPromptViewController: UIViewController {
         self.client = client
         self.titleText = titleText
         self.subtitleText = subtitleText
+        self.getKeyURL = getKeyURL
         self.prefillKey = prefillKey
         self.initialError = initialError
         self.onAuthorized = onAuthorized
@@ -112,10 +116,19 @@ public final class KeyPromptViewController: UIViewController {
         buttonRow.spacing = 10
         buttonRow.distribution = .fillEqually
 
+        getKeyButton.setTitle("Get Key Free (24h)", for: .normal)
+        getKeyButton.setTitleColor(.white, for: .normal)
+        getKeyButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        getKeyButton.backgroundColor = UIColor(red: 0.36, green: 0.38, blue: 0.94, alpha: 1.0)
+        getKeyButton.layer.cornerRadius = 10
+        getKeyButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        getKeyButton.isHidden = (getKeyURL == nil)
+        getKeyButton.addTarget(self, action: #selector(handleGetKey), for: .touchUpInside)
+
         spinner.color = .white
         spinner.hidesWhenStopped = true
 
-        let stack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel, keyField, errorLabel, buttonRow, spinner])
+        let stack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel, keyField, errorLabel, buttonRow, getKeyButton, spinner])
         stack.axis = .vertical
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -137,6 +150,11 @@ public final class KeyPromptViewController: UIViewController {
         if let text = UIPasteboard.general.string {
             keyField.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+    }
+
+    @objc private func handleGetKey() {
+        guard let url = getKeyURL else { return }
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
     }
 
     @objc private func handleSubmit() {
