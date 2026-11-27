@@ -11,6 +11,7 @@ public final class KeyAuthGate: NSObject {
     private static var hookInstalled = false
     private static var watchdogTimer: Timer?
     private static weak var authorizedMenuLoad: NSObject?
+    private static var activeClient: LicenseClient?
 
     @objc public static func installHook() {
         #if canImport(UIKit)
@@ -64,7 +65,7 @@ public final class KeyAuthGate: NSObject {
         let title = (info["KeyAuthTitle"] as? String) ?? "KT AOV"
         let subtitle = (info["KeyAuthSubtitle"] as? String) ?? "Enter your activation key"
 
-        guard let window = findKeyWindow() else {
+        guard let window = findKeyWindow(), window.rootViewController != nil else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 presentAuthAndUnlock(menuLoadInstance: menuLoadInstance)
             }
@@ -72,7 +73,9 @@ public final class KeyAuthGate: NSObject {
         }
 
         let client = LicenseClient(baseURL: serverURL, publicKeyBase64: pubKey)
+        activeClient = client
         client.bootstrap(in: window, title: title, subtitle: subtitle) { _ in
+            activeClient = nil
             if let obj = menuLoadInstance as? NSObject {
                 authorizedMenuLoad = obj
                 attachMenu(menuLoadObj: obj)
@@ -136,17 +139,21 @@ public final class KeyAuthGate: NSObject {
         }
     }
 
+    private static func pickNormalWindow(from windows: [UIWindow]) -> UIWindow? {
+        let candidates = windows.filter { !$0.isHidden && $0.rootViewController != nil && $0.windowLevel == .normal }
+        return candidates.first(where: { $0.isKeyWindow }) ?? candidates.first
+    }
+
     private static func findKeyWindow() -> UIWindow? {
         if #available(iOS 15.0, *) {
             for scene in UIApplication.shared.connectedScenes {
-                if let winScene = scene as? UIWindowScene {
-                    if let key = winScene.windows.first(where: { $0.isKeyWindow }) ?? winScene.windows.first {
-                        return key
-                    }
+                if let winScene = scene as? UIWindowScene,
+                   let match = pickNormalWindow(from: winScene.windows) {
+                    return match
                 }
             }
         }
-        return UIApplication.shared.windows.first(where: { $0.isKeyWindow }) ?? UIApplication.shared.windows.first
+        return pickNormalWindow(from: UIApplication.shared.windows)
     }
     #endif
 }

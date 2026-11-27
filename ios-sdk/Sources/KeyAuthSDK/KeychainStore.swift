@@ -5,11 +5,15 @@ import Security
 import UIKit
 #endif
 
-/// Persistent iOS/macOS Keychain storage for device identity and activated license keys.
+/// Persistent iOS/macOS Keychain storage (with UserDefaults fallback if Keychain entitlements are unavailable).
 public enum KeychainStore {
     public static let defaultService = "com.ktaov.keyauth"
     private static let deviceAccount = "device_udid"
     private static let keyAccount = "license_key"
+
+    private static func fallbackKey(service: String, account: String) -> String {
+        "\(service).\(account)"
+    }
 
     @discardableResult
     public static func save(_ value: String, account: String, service: String = defaultService) -> Bool {
@@ -24,7 +28,11 @@ public enum KeychainStore {
         var newItem = baseQuery
         newItem[kSecValueData as String] = data
         newItem[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(newItem as CFDictionary, nil) == errSecSuccess
+        let status = SecItemAdd(newItem as CFDictionary, nil)
+
+        // Mirror to UserDefaults so sideloaded builds / macOS without Keychain entitlements still persist state
+        UserDefaults.standard.set(value, forKey: fallbackKey(service: service, account: account))
+        return status == errSecSuccess
     }
 
     public static func load(account: String, service: String = defaultService) -> String? {
@@ -36,12 +44,17 @@ public enum KeychainStore {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let string = String(data: data, encoding: .utf8) else {
-            return nil
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data,
+           let string = String(data: data, encoding: .utf8),
+           !string.isEmpty {
+            return string
         }
-        return string
+        if let fallback = UserDefaults.standard.string(forKey: fallbackKey(service: service, account: account)),
+           !fallback.isEmpty {
+            return fallback
+        }
+        return nil
     }
 
     public static func delete(account: String, service: String = defaultService) {
@@ -51,6 +64,7 @@ public enum KeychainStore {
             kSecAttrAccount as String: account
         ]
         SecItemDelete(query as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: fallbackKey(service: service, account: account))
     }
 
     /// Returns a persistent device ID that survives app reinstalls via Keychain.

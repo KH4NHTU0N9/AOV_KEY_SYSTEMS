@@ -128,8 +128,7 @@ public final class LicenseClient {
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        session.dataTask(with: request) { [weak self] data, _, err in
-            guard let self else { return }
+        session.dataTask(with: request) { data, _, err in
             if let err {
                 DispatchQueue.main.async { completion(.failure(.networkError(err.localizedDescription))) }
                 return
@@ -169,18 +168,36 @@ public final class LicenseClient {
         onAuthorized: @escaping (LicensePayload) -> Void
     ) {
         if let saved = KeychainStore.savedLicenseKey(service: serviceName) {
-            verify(key: saved) { [weak self, weak window] result in
-                guard let self, let window else { return }
+            verify(key: saved) { [weak window] result in
+                guard let window else { return }
                 switch result {
                 case .success(let payload):
                     onAuthorized(payload)
                 case .failure(let error):
-                    KeychainStore.clearLicenseKey(service: self.serviceName)
-                    self.presentPrompt(in: window, title: title, subtitle: subtitle, initialError: error.localizedDescription, onAuthorized: onAuthorized)
+                    if case .networkError = error {
+                        // Keep saved key on transient network error so user can retry without retyping
+                    } else {
+                        KeychainStore.clearLicenseKey(service: self.serviceName)
+                    }
+                    self.presentPrompt(
+                        in: window,
+                        title: title,
+                        subtitle: subtitle,
+                        prefillKey: saved,
+                        initialError: error.localizedDescription,
+                        onAuthorized: onAuthorized
+                    )
                 }
             }
         } else {
-            presentPrompt(in: window, title: title, subtitle: subtitle, initialError: nil, onAuthorized: onAuthorized)
+            presentPrompt(
+                in: window,
+                title: title,
+                subtitle: subtitle,
+                prefillKey: nil,
+                initialError: nil,
+                onAuthorized: onAuthorized
+            )
         }
     }
 
@@ -188,11 +205,25 @@ public final class LicenseClient {
         in window: UIWindow,
         title: String,
         subtitle: String,
+        prefillKey: String?,
         initialError: String?,
         onAuthorized: @escaping (LicensePayload) -> Void
     ) {
-        DispatchQueue.main.async {
-            guard var topVC = window.rootViewController else { return }
+        DispatchQueue.main.async { [weak window] in
+            guard let window else { return }
+            guard var topVC = window.rootViewController else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.presentPrompt(
+                        in: window,
+                        title: title,
+                        subtitle: subtitle,
+                        prefillKey: prefillKey,
+                        initialError: initialError,
+                        onAuthorized: onAuthorized
+                    )
+                }
+                return
+            }
             while let presented = topVC.presentedViewController {
                 topVC = presented
             }
@@ -200,6 +231,7 @@ public final class LicenseClient {
                 client: self,
                 titleText: title,
                 subtitleText: subtitle,
+                prefillKey: prefillKey,
                 initialError: initialError,
                 onAuthorized: onAuthorized
             )

@@ -7,6 +7,7 @@ public final class KeyPromptViewController: UIViewController {
     private let client: LicenseClient
     private let titleText: String
     private let subtitleText: String
+    private let prefillKey: String?
     private let initialError: String?
     private let onAuthorized: (LicensePayload) -> Void
 
@@ -23,12 +24,14 @@ public final class KeyPromptViewController: UIViewController {
         client: LicenseClient,
         titleText: String,
         subtitleText: String,
+        prefillKey: String? = nil,
         initialError: String? = nil,
         onAuthorized: @escaping (LicensePayload) -> Void
     ) {
         self.client = client
         self.titleText = titleText
         self.subtitleText = subtitleText
+        self.prefillKey = prefillKey
         self.initialError = initialError
         self.onAuthorized = onAuthorized
         super.init(nibName: nil, bundle: nil)
@@ -41,6 +44,9 @@ public final class KeyPromptViewController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        if let prefillKey, !prefillKey.isEmpty {
+            keyField.text = prefillKey
+        }
         if let initialError {
             showError(initialError)
         }
