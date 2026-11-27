@@ -67,13 +67,17 @@ def inject_load_dylib(macho_bytes: bytearray, dylib_path: str) -> bool:
     return True
 
 
-def patch_awscognito_optional(data: bytearray, menu_name: str | None) -> None:
-    """Neutralize fallback third-party login UI and optionally rebrand header if offsets match."""
-    # Disable ASStatusView login/expired/error forms as defense-in-depth (KeyAuthGate replaces checkAndExecutePaidBlock)
+def patch_awscognito_optional(
+    data: bytearray,
+    menu_name: str | None,
+    github_url: str | None = "https://github.com/KH4NHTU0N9",
+) -> None:
+    """Neutralize fallback third-party login UI, rebrand header/TUMADAM strings, and keep only GitHub link."""
     fallback_ret_offsets = [0x13A7C94, 0x1372B9C, 0x13C37B0, 0x137520C, 0x138A198, 0x1394408, 0x135C994]
     if len(data) > 0x2600000 and data[0x2550CD3 : 0x2550CD3 + 15] == b"AovCheat || 257":
         for off in fallback_ret_offsets:
             struct.pack_into("<I", data, off, 0xD65F03C0)  # ret
+
         if menu_name:
             encoded = menu_name.encode("ascii")
             if len(encoded) > 15:
@@ -81,6 +85,38 @@ def patch_awscognito_optional(data: bytearray, menu_name: str | None) -> None:
             data[0x2550CD3 : 0x2550CD3 + 16] = encoded + b"\x00" * (16 - len(encoded))
             struct.pack_into("<Q", data, 0x2A2A9D8 + 24, len(encoded))
             struct.pack_into("<I", data, 0x241F040, 0xAA0803F6)  # mov x22, x8
+
+        # Replace "TUMADAM" brand label at 0x2550b9f (CFString 0x2a2a598)
+        if data[0x2550B9F : 0x2550B9F + 8] == b"TUMADAM\x00":
+            brand = (menu_name or "KT AOV").encode("ascii")[:7]
+            data[0x2550B9F : 0x2550B9F + 8] = brand + b"\x00" * (8 - len(brand))
+            struct.pack_into("<Q", data, 0x2A2A598 + 24, len(brand))
+
+        # Replace TUMADAM. cache prefix strings preserving exact 8-byte length
+        for off in [0x25512A9, 0x25512CA, 0x25512E4]:
+            if data[off : off + 8] == b"TUMADAM.":
+                data[off : off + 8] = b"KT_AOV_."
+
+        # Keep only 1 social button ("GitHub") pointing to github_url
+        if github_url and data[0x2550E73 : 0x2550E8C] == b"Telegram\x00Discord\x00Website\x00":
+            url_bytes = github_url.strip().encode("ascii")
+            if len(url_bytes) > 82:
+                raise ValueError("github_url too long for inline string slot (max 82 bytes)")
+
+            data[0x2550E73 : 0x2550E7C] = b"GitHub\x00\x00\x00"
+            struct.pack_into("<Q", data, 0x2A2B138 + 24, 6)
+
+            # Wipe Telegram/Discord/Website URLs and write GitHub URL
+            data[0x2550E7C : 0x2550EE0] = b"\x00" * (0x2550EE0 - 0x2550E7C)
+            data[0x2550E8C : 0x2550E8C + len(url_bytes)] = url_bytes
+            struct.pack_into("<Q", data, 0x2A2B198 + 24, len(url_bytes))
+
+            # Patch array counts, button width divisor, and loop bound from 3 -> 1
+            if struct.unpack("<I", data[0x2426998 : 0x242699C])[0] == 0x52800063:
+                struct.pack_into("<I", data, 0x2426998, 0x52800023)  # mov w3, #1 (titles)
+                struct.pack_into("<I", data, 0x24269DC, 0x52800023)  # mov w3, #1 (urls)
+                struct.pack_into("<I", data, 0x24269FC, 0x1E6E1000)  # fmov d0, #1.0
+                struct.pack_into("<I", data, 0x2426D28, 0xF100067F)  # cmp x19, #1
 
 
 def configure_framework_plist(framework_dir: Path, server_url: str, public_key: str, title: str, subtitle: str) -> None:
@@ -109,6 +145,28 @@ def configure_framework_plist(framework_dir: Path, server_url: str, public_key: 
         plistlib.dump(plist_data, f)
 
 
+def rebrand_plists(app_dir: Path, bundle_id: str) -> list[Path]:
+    """Replace third-party tumadam bundle identifiers and decrypt attribution tags."""
+    updated_frameworks: list[Path] = []
+    app_plist = app_dir / "Info.plist"
+    if app_plist.exists():
+        data = plistlib.loads(app_plist.read_bytes())
+        if "tumadam" in str(data.get("CFBundleIdentifier", "")).lower():
+            data["CFBundleIdentifier"] = bundle_id
+        data.pop("DecryptedBy", None)
+        app_plist.write_bytes(plistlib.dumps(data))
+
+    rt_fw = app_dir / "Frameworks" / "Runtime9r53i.framework"
+    rt_plist = rt_fw / "Info.plist"
+    if rt_plist.exists():
+        rdata = plistlib.loads(rt_plist.read_bytes())
+        if "tumadam" in str(rdata.get("CFBundleIdentifier", "")).lower():
+            rdata["CFBundleIdentifier"] = f"{bundle_id}.embedded.runtime9r53i"
+            rt_plist.write_bytes(plistlib.dumps(rdata))
+            updated_frameworks.append(rt_fw)
+    return updated_frameworks
+
+
 def build_ipa(
     ipa_path: Path,
     framework_path: Path,
@@ -116,6 +174,8 @@ def build_ipa(
     public_key: str,
     out_path: Path,
     menu_name: str | None = "KT AOV",
+    github_url: str | None = "https://github.com/KH4NHTU0N9",
+    bundle_id: str = "com.ktaov.aovx",
     title: str = "KT AOV",
     subtitle: str = "Enter your activation key",
     sign: bool = True,
@@ -173,19 +233,19 @@ def build_ipa(
         shutil.copytree(framework_path, dst_fw)
         configure_framework_plist(dst_fw, server_url, public_key, title, subtitle)
 
-        print("[3] Injecting LC_LOAD_DYLIB into AWSCognito...")
+        print("[3] Injecting LC_LOAD_DYLIB & rebranding AWSCognito...")
         raw_aws = bytearray(aws_bin.read_bytes())
         added = inject_load_dylib(raw_aws, "@rpath/KeyAuthSDK.framework/KeyAuthSDK")
         print(f"    LC_LOAD_DYLIB added: {added}")
-        patch_awscognito_optional(raw_aws, menu_name)
+        patch_awscognito_optional(raw_aws, menu_name, github_url=github_url)
         aws_bin.write_bytes(raw_aws)
+        extra_signed_fws = rebrand_plists(app_dir, bundle_id)
 
         if sign and sys.platform == "darwin":
             print("[4] Ad-hoc codesigning modified frameworks...")
-            subprocess.check_call(["codesign", "-f", "-s", "-", str(dst_fw)])
-            subprocess.check_call(["codesign", "-f", "-s", "-", str(aws_fw)])
-            subprocess.check_call(["codesign", "-v", str(dst_fw)])
-            subprocess.check_call(["codesign", "-v", str(aws_fw)])
+            for fw in [dst_fw, aws_fw, *extra_signed_fws]:
+                subprocess.check_call(["codesign", "-f", "-s", "-", str(fw)])
+                subprocess.check_call(["codesign", "-v", str(fw)])
         else:
             print("[4] Skipping codesign (re-sign via Sideloadly/ESign/AltStore before installing)")
 
@@ -207,6 +267,8 @@ def main() -> None:
     parser.add_argument("--server-url", required=True, help="Your KeyAuth FastAPI server URL")
     parser.add_argument("--public-key", required=True, help="Ed25519 base64 public key from cli.py pubkey")
     parser.add_argument("--menu-name", default="KT AOV", help="Menu header name (<= 15 ASCII chars)")
+    parser.add_argument("--github-url", default="https://github.com/KH4NHTU0N9", help="Single social link URL")
+    parser.add_argument("--bundle-id", default="com.ktaov.aovx", help="App CFBundleIdentifier")
     parser.add_argument("--title", default="KT AOV", help="Key prompt modal title")
     parser.add_argument("--subtitle", default="Enter your activation key", help="Key prompt modal subtitle")
     parser.add_argument("--out", required=True, help="Output .ipa path")
@@ -220,6 +282,8 @@ def main() -> None:
         public_key=args.public_key,
         out_path=Path(args.out),
         menu_name=args.menu_name,
+        github_url=args.github_url,
+        bundle_id=args.bundle_id,
         title=args.title,
         subtitle=args.subtitle,
         sign=not args.no_sign,

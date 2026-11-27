@@ -9,6 +9,8 @@ import UIKit
 @objc(KeyAuthGate)
 public final class KeyAuthGate: NSObject {
     private static var hookInstalled = false
+    private static var watchdogTimer: Timer?
+    private static weak var authorizedMenuLoad: NSObject?
 
     @objc public static func installHook() {
         #if canImport(UIKit)
@@ -71,10 +73,66 @@ public final class KeyAuthGate: NSObject {
 
         let client = LicenseClient(baseURL: serverURL, publicKeyBase64: pubKey)
         client.bootstrap(in: window, title: title, subtitle: subtitle) { _ in
-            let initSel = NSSelectorFromString("initTapGes")
-            if let obj = menuLoadInstance as? NSObject, obj.responds(to: initSel) {
-                _ = obj.perform(initSel)
+            if let obj = menuLoadInstance as? NSObject {
+                authorizedMenuLoad = obj
+                attachMenu(menuLoadObj: obj)
+                startOverlayWatchdog()
             }
+        }
+    }
+
+    private static func attachMenu(menuLoadObj: NSObject) {
+        let initSel = NSSelectorFromString("initTapGes")
+        if menuLoadObj.responds(to: initSel) {
+            _ = menuLoadObj.perform(initSel)
+        }
+    }
+
+    /// Re-attaches TDMenuController whenever logout/login swaps rootViewController or UIWindow.
+    private static func startOverlayWatchdog() {
+        guard watchdogTimer == nil else { return }
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            guard let menuLoadObj = authorizedMenuLoad,
+                  let activeWindow = findKeyWindow(),
+                  let activeRoot = activeWindow.rootViewController else {
+                return
+            }
+
+            if let tdClass: AnyClass = objc_getClass("TDMenuController") as? AnyClass {
+                let sharedSel = NSSelectorFromString("shared")
+                if let sharedObj = (tdClass as AnyObject).perform(sharedSel)?.takeUnretainedValue(),
+                   let menuVC = sharedObj as? UIViewController {
+                    let loadedView = menuVC.viewIfLoaded
+                    let wrongParent = (menuVC.parent !== activeRoot)
+                    let wrongWindow = (loadedView?.window !== activeWindow)
+                    let detached = (loadedView?.superview == nil)
+
+                    if wrongParent || wrongWindow || detached {
+                        attachMenu(menuLoadObj: menuLoadObj)
+                    }
+
+                    if let view = menuVC.viewIfLoaded,
+                       let superview = view.superview,
+                       activeRoot.presentedViewController == nil,
+                       superview.subviews.last !== view {
+                        superview.bringSubviewToFront(view)
+                    }
+
+                    // Ensure floating bubble never gets stuck invisible while panel is closed
+                    if menuVC.responds(to: NSSelectorFromString("panel")),
+                       menuVC.responds(to: NSSelectorFromString("bubble")),
+                       let panel = menuVC.value(forKey: "panel") as? UIView,
+                       let bubble = menuVC.value(forKey: "bubble") as? UIView,
+                       panel.isHidden,
+                       (bubble.isHidden || bubble.alpha < 0.1) {
+                        bubble.isHidden = false
+                        bubble.alpha = 1.0
+                    }
+                    return
+                }
+            }
+
+            attachMenu(menuLoadObj: menuLoadObj)
         }
     }
 
