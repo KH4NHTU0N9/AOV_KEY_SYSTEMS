@@ -17,8 +17,9 @@ public final class KeyAuthGate: NSObject {
     private static var activeClient: LicenseClient?
     private static var activePayload: LicensePayload?
     #if canImport(UIKit)
-    private static var overlayBridgeHandler: ((UIWindow, LicensePayload, URL, String, String?) -> Void)?
+    @MainActor private static var overlayBridgeHandler: ((UIWindow, LicensePayload, URL, String, String?) -> Void)?
 
+    @MainActor
     public static func registerOverlayPresenter(
         _ handler: @escaping (UIWindow, LicensePayload, URL, String, String?) -> Void
     ) {
@@ -35,18 +36,35 @@ public final class KeyAuthGate: NSObject {
             return
         }
 
-        // Wait until UIApplication finishes launching for standalone non-AWSCognito IPAs
+        // Schedule UIApplication observer and standalone fallback on the main actor.
+        DispatchQueue.main.async {
+            setupStandaloneFallback()
+        }
+        #endif
+    }
+
+    #if canImport(UIKit)
+    @MainActor
+    private static func setupStandaloneFallback() {
+        guard !hookInstalled else { return }
+        if attemptSwizzle() {
+            hookInstalled = true
+            return
+        }
+
         NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
             object: nil,
             queue: .main
         ) { _ in
-            if !hookInstalled, attemptSwizzle() {
-                hookInstalled = true
-                return
-            }
-            if !hookInstalled && !authStarted {
-                startStandaloneAuth()
+            DispatchQueue.main.async {
+                if !hookInstalled, attemptSwizzle() {
+                    hookInstalled = true
+                    return
+                }
+                if !hookInstalled && !authStarted {
+                    startStandaloneAuth()
+                }
             }
         }
 
@@ -59,10 +77,8 @@ public final class KeyAuthGate: NSObject {
                 startStandaloneAuth()
             }
         }
-        #endif
     }
 
-    #if canImport(UIKit)
     private static func attemptSwizzle() -> Bool {
         guard let menuClass: AnyClass = objc_getClass("MenuLoad") as? AnyClass else {
             return false
@@ -81,11 +97,13 @@ public final class KeyAuthGate: NSObject {
         return true
     }
 
+    @MainActor
     private static func startStandaloneAuth() {
         hookInstalled = true
         presentAuthAndUnlock(menuLoadInstance: nil)
     }
 
+    @MainActor
     private static func presentAuthAndUnlock(menuLoadInstance: AnyObject?) {
         guard !authStarted || menuLoadInstance != nil else { return }
         authStarted = true
@@ -135,6 +153,7 @@ public final class KeyAuthGate: NSObject {
         }
     }
 
+    @MainActor
     private static func presentStandaloneOverlay(
         in window: UIWindow,
         payload: LicensePayload,
@@ -160,6 +179,7 @@ public final class KeyAuthGate: NSObject {
         }
     }
 
+    @MainActor
     private static func hideStandaloneOverlay() {
         if let overlayCls: AnyClass = NSClassFromString("KTImGuiOverlay") {
             let hideSel = NSSelectorFromString("hide")
@@ -169,6 +189,7 @@ public final class KeyAuthGate: NSObject {
         }
     }
 
+    @MainActor
     private static func attachMenu(menuLoadObj: NSObject) {
         let initSel = NSSelectorFromString("initTapGes")
         if menuLoadObj.responds(to: initSel) {
@@ -177,14 +198,24 @@ public final class KeyAuthGate: NSObject {
     }
 
     /// Re-attaches overlay across logout/login and enforces server/expiry re-checks.
+    @MainActor
     private static func startOverlayWatchdog(serverURL: URL, pubKey: String, getKeyRaw: String?) {
         guard watchdogTimer == nil else { return }
         watchdogTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            guard isAuthorized, let payload = activePayload else { return }
-            let now = Date().timeIntervalSince1970
-            if now >= payload.expires_at || (now - lastReverifyAt) >= 45.0 {
-                lastReverifyAt = now
-                activeClient?.verify(key: payload.key, deviceID: payload.device_id) { res in
+            DispatchQueue.main.async {
+                tickOverlayWatchdog(serverURL: serverURL, pubKey: pubKey, getKeyRaw: getKeyRaw)
+            }
+        }
+    }
+
+    @MainActor
+    private static func tickOverlayWatchdog(serverURL: URL, pubKey: String, getKeyRaw: String?) {
+        guard isAuthorized, let payload = activePayload else { return }
+        let now = Date().timeIntervalSince1970
+        if now >= payload.expires_at || (now - lastReverifyAt) >= 45.0 {
+            lastReverifyAt = now
+            activeClient?.verify(key: payload.key, deviceID: payload.device_id) { res in
+                DispatchQueue.main.async {
                     switch res {
                     case .success(let refreshed):
                         activePayload = refreshed
@@ -200,62 +231,63 @@ public final class KeyAuthGate: NSObject {
                     }
                 }
             }
+        }
 
-            guard let activeWindow = findKeyWindow(),
-                  let activeRoot = activeWindow.rootViewController else {
-                return
-            }
+        guard let activeWindow = findKeyWindow(),
+              let activeRoot = activeWindow.rootViewController else {
+            return
+        }
 
-            if let menuLoadObj = authorizedMenuLoad {
-                if let tdClass: AnyClass = objc_getClass("TDMenuController") as? AnyClass {
-                    let sharedSel = NSSelectorFromString("shared")
-                    if let sharedObj = (tdClass as AnyObject).perform(sharedSel)?.takeUnretainedValue(),
-                       let menuVC = sharedObj as? UIViewController {
-                        let loadedView = menuVC.viewIfLoaded
-                        let wrongParent = (menuVC.parent !== activeRoot)
-                        let wrongWindow = (loadedView?.window !== activeWindow)
-                        let detached = (loadedView?.superview == nil)
-                        if wrongParent || wrongWindow || detached {
-                            attachMenu(menuLoadObj: menuLoadObj)
-                        }
-                        if let view = menuVC.viewIfLoaded,
-                           let superview = view.superview,
-                           activeRoot.presentedViewController == nil,
-                           superview.subviews.last !== view {
-                            superview.bringSubviewToFront(view)
-                        }
-                        if menuVC.responds(to: NSSelectorFromString("panel")),
-                           menuVC.responds(to: NSSelectorFromString("bubble")),
-                           let panel = menuVC.value(forKey: "panel") as? UIView,
-                           let bubble = menuVC.value(forKey: "bubble") as? UIView,
-                           panel.isHidden,
-                           (bubble.isHidden || bubble.alpha < 0.1) {
-                            bubble.isHidden = false
-                            bubble.alpha = 1.0
-                        }
-                        return
+        if let menuLoadObj = authorizedMenuLoad {
+            if let tdClass: AnyClass = objc_getClass("TDMenuController") as? AnyClass {
+                let sharedSel = NSSelectorFromString("shared")
+                if let sharedObj = (tdClass as AnyObject).perform(sharedSel)?.takeUnretainedValue(),
+                   let menuVC = sharedObj as? UIViewController {
+                    let loadedView = menuVC.viewIfLoaded
+                    let wrongParent = (menuVC.parent !== activeRoot)
+                    let wrongWindow = (loadedView?.window !== activeWindow)
+                    let detached = (loadedView?.superview == nil)
+                    if wrongParent || wrongWindow || detached {
+                        attachMenu(menuLoadObj: menuLoadObj)
                     }
+                    if let view = menuVC.viewIfLoaded,
+                       let superview = view.superview,
+                       activeRoot.presentedViewController == nil,
+                       superview.subviews.last !== view {
+                        superview.bringSubviewToFront(view)
+                    }
+                    if menuVC.responds(to: NSSelectorFromString("panel")),
+                       menuVC.responds(to: NSSelectorFromString("bubble")),
+                       let panel = menuVC.value(forKey: "panel") as? UIView,
+                       let bubble = menuVC.value(forKey: "bubble") as? UIView,
+                       panel.isHidden,
+                       (bubble.isHidden || bubble.alpha < 0.1) {
+                        bubble.isHidden = false
+                        bubble.alpha = 1.0
+                    }
+                    return
                 }
-                attachMenu(menuLoadObj: menuLoadObj)
-            } else {
-                // Re-attach standalone KTImGuiOverlay only if hidden/detached
-                if let overlayCls: AnyClass = NSClassFromString("KTImGuiOverlay") {
-                    let visSel = NSSelectorFromString("isVisible")
-                    var visible = false
-                    if (overlayCls as AnyObject).responds(to: visSel),
-                       let imp = class_getMethodImplementation(object_getClass(overlayCls), visSel) {
-                        typealias BoolFn = @convention(c) (AnyObject, Selector) -> Bool
-                        let fn = unsafeBitCast(imp, to: BoolFn.self)
-                        visible = fn(overlayCls as AnyObject, visSel)
-                    }
-                    if !visible {
-                        presentStandaloneOverlay(in: activeWindow, payload: payload, serverURL: serverURL, pubKey: pubKey, getKeyRaw: getKeyRaw)
-                    }
+            }
+            attachMenu(menuLoadObj: menuLoadObj)
+        } else {
+            // Re-attach standalone KTImGuiOverlay only if hidden/detached
+            if let overlayCls: AnyClass = NSClassFromString("KTImGuiOverlay") {
+                let visSel = NSSelectorFromString("isVisible")
+                var visible = false
+                if (overlayCls as AnyObject).responds(to: visSel),
+                   let imp = class_getMethodImplementation(object_getClass(overlayCls), visSel) {
+                    typealias BoolFn = @convention(c) (AnyObject, Selector) -> Bool
+                    let fn = unsafeBitCast(imp, to: BoolFn.self)
+                    visible = fn(overlayCls as AnyObject, visSel)
+                }
+                if !visible {
+                    presentStandaloneOverlay(in: activeWindow, payload: payload, serverURL: serverURL, pubKey: pubKey, getKeyRaw: getKeyRaw)
                 }
             }
         }
     }
 
+    @MainActor
     private static func revokeAndPrompt(serverURL: URL, pubKey: String, getKeyRaw: String?) {
         isAuthorized = false
         authStarted = false
@@ -266,11 +298,13 @@ public final class KeyAuthGate: NSObject {
         presentAuthAndUnlock(menuLoadInstance: authorizedMenuLoad)
     }
 
+    @MainActor
     private static func pickNormalWindow(from windows: [UIWindow]) -> UIWindow? {
         let candidates = windows.filter { !$0.isHidden && $0.rootViewController != nil && $0.windowLevel == .normal }
         return candidates.first(where: { $0.isKeyWindow }) ?? candidates.first
     }
 
+    @MainActor
     private static func findKeyWindow() -> UIWindow? {
         if #available(iOS 15.0, *) {
             for scene in UIApplication.shared.connectedScenes {

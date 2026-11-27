@@ -20,7 +20,6 @@ let package = Package(
                 .headerSearchPath("Vendor/imgui"),
                 .headerSearchPath("Vendor/imgui/backends"),
                 .define("IMGUI_DISABLE_OBSOLETE_FUNCTIONS"),
-                .unsafeFlags(["-fvisibility=hidden"]),
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),
