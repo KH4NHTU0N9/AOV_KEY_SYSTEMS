@@ -39,7 +39,6 @@ jobs:
             -derivedDataPath .derivedData \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=NO \
-            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Package KeyAuthSDK.framework bundle
@@ -49,6 +48,8 @@ jobs:
 
           if [ -d "$PROD/PackageFrameworks/KeyAuthSDK.framework" ]; then
             cp -R "$PROD/PackageFrameworks/KeyAuthSDK.framework/." dist/KeyAuthSDK.framework/
+          elif [ -d "$PROD/KeyAuthSDK.framework" ]; then
+            cp -R "$PROD/KeyAuthSDK.framework/." dist/KeyAuthSDK.framework/
           elif [ -f "$PROD/libKeyAuthSDK.dylib" ]; then
             cp "$PROD/libKeyAuthSDK.dylib" dist/KeyAuthSDK.framework/KeyAuthSDK
           elif [ -f "$PROD/KeyAuthSDK.o" ]; then
@@ -67,21 +68,7 @@ jobs:
           fi
 
           if [ ! -f dist/KeyAuthSDK.framework/Info.plist ]; then
-            python3 -c '
-import plistlib
-with open("dist/KeyAuthSDK.framework/Info.plist", "wb") as f:
-    plistlib.dump({
-        "CFBundleDevelopmentRegion": "en",
-        "CFBundleExecutable": "KeyAuthSDK",
-        "CFBundleIdentifier": "com.ktaov.KeyAuthSDK",
-        "CFBundleInfoDictionaryVersion": "6.0",
-        "CFBundleName": "KeyAuthSDK",
-        "CFBundlePackageType": "FMWK",
-        "CFBundleShortVersionString": "1.0",
-        "CFBundleVersion": "1",
-        "MinimumOSVersion": "14.0",
-    }, f)
-'
+            python3 -c 'import plistlib; plistlib.dump({"CFBundleDevelopmentRegion":"en","CFBundleExecutable":"KeyAuthSDK","CFBundleIdentifier":"com.ktaov.KeyAuthSDK","CFBundleInfoDictionaryVersion":"6.0","CFBundleName":"KeyAuthSDK","CFBundlePackageType":"FMWK","CFBundleShortVersionString":"1.0","CFBundleVersion":"1","MinimumOSVersion":"14.0"}, open("dist/KeyAuthSDK.framework/Info.plist","wb"))'
           fi
 
           install_name_tool -id @rpath/KeyAuthSDK.framework/KeyAuthSDK dist/KeyAuthSDK.framework/KeyAuthSDK
