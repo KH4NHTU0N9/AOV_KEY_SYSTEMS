@@ -1,0 +1,99 @@
+name: Build KeyAuthSDK iOS Framework
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install backend dependencies & run pytest
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pytest -v
+
+  build-ios-framework:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer || true
+          xcodebuild -version
+
+      - name: Build KeyAuthSDK for iOS (arm64)
+        run: |
+          cd ios-sdk
+          xcodebuild build \
+            -scheme KeyAuthSDK \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath .derivedData \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package KeyAuthSDK.framework bundle
+        run: |
+          mkdir -p dist/KeyAuthSDK.framework
+          PROD="ios-sdk/.derivedData/Build/Products/Release-iphoneos"
+
+          if [ -d "$PROD/PackageFrameworks/KeyAuthSDK.framework" ]; then
+            cp -R "$PROD/PackageFrameworks/KeyAuthSDK.framework/." dist/KeyAuthSDK.framework/
+          elif [ -f "$PROD/libKeyAuthSDK.dylib" ]; then
+            cp "$PROD/libKeyAuthSDK.dylib" dist/KeyAuthSDK.framework/KeyAuthSDK
+          elif [ -f "$PROD/KeyAuthSDK.o" ]; then
+            echo "Found object output; linking dynamic framework..."
+            clang -arch arm64 -dynamiclib \
+              -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+              -miphoneos-version-min=14.0 \
+              -install_name @rpath/KeyAuthSDK.framework/KeyAuthSDK \
+              -framework Foundation -framework UIKit -framework Security -framework CryptoKit \
+              -lobjc \
+              "$PROD"/*.o \
+              -o dist/KeyAuthSDK.framework/KeyAuthSDK
+          else
+            find "$PROD" -maxdepth 3
+            exit 1
+          fi
+
+          if [ ! -f dist/KeyAuthSDK.framework/Info.plist ]; then
+            python3 -c '
+import plistlib
+with open("dist/KeyAuthSDK.framework/Info.plist", "wb") as f:
+    plistlib.dump({
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleExecutable": "KeyAuthSDK",
+        "CFBundleIdentifier": "com.ktaov.KeyAuthSDK",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleName": "KeyAuthSDK",
+        "CFBundlePackageType": "FMWK",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+        "MinimumOSVersion": "14.0",
+    }, f)
+'
+          fi
+
+          install_name_tool -id @rpath/KeyAuthSDK.framework/KeyAuthSDK dist/KeyAuthSDK.framework/KeyAuthSDK
+          codesign -f -s - dist/KeyAuthSDK.framework
+          file dist/KeyAuthSDK.framework/KeyAuthSDK
+          otool -L dist/KeyAuthSDK.framework/KeyAuthSDK
+          nm -gU dist/KeyAuthSDK.framework/KeyAuthSDK | grep -E "KeyAuthGate|KeyAuthLoader" || true
+
+          cd dist && zip -r ../KeyAuthSDK.framework.zip KeyAuthSDK.framework
+
+      - name: Upload KeyAuthSDK.framework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyAuthSDK-ios-arm64
+          path: KeyAuthSDK.framework.zip

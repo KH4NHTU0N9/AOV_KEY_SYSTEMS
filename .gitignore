@@ -1,0 +1,15 @@
+# Secret keys, tokens, and local database (NEVER commit to GitHub)
+backend/data/
+backend/.venv/
+backend/__pycache__/
+backend/tests/__pycache__/
+backend/.pytest_cache/
+scripts/__pycache__/
+
+# Swift build artifacts
+ios-sdk/.build/
+ios-sdk/.derivedData/
+dist/
+*.zip
+*.ipa
+.DS_Store
