@@ -423,15 +423,24 @@ static NSString *const kPrefAlpha = @"ktaov.panel_alpha";
                         ImGui::TextUnformatted(vecs[i].label);
                         ImGui::TableSetColumnIndex(2);
                         if (vecs[i].targetVA != 0) {
-                            ImGui::Text("0x%lx", (unsigned long)vecs[i].targetVA);
+                            ImGui::Text("0x%llX", (unsigned long long)vecs[i].targetVA);
                         } else {
                             ImGui::TextDisabled("NULL");
                         }
                         ImGui::TableSetColumnIndex(3);
-                        if (vecs[i].active) {
-                            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f), "Đã triệt tiêu");
-                        } else {
-                            ImGui::TextColored(ImVec4(0.8f, 0.5f, 0.2f, 1.0f), "Chờ Unity");
+                        switch (vecs[i].state) {
+                            case ktbridge::AntibanState::Suppressed:
+                                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.35f, 1.0f), "Đã triệt tiêu");
+                                break;
+                            case ktbridge::AntibanState::Hooked:
+                                ImGui::TextColored(ImVec4(0.22f, 0.74f, 0.97f, 1.0f), "Đã Hook");
+                                break;
+                            case ktbridge::AntibanState::Monitored:
+                                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.2f, 1.0f), "Theo dõi");
+                                break;
+                            default:
+                                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Chờ Unity");
+                                break;
                         }
                     }
                     ImGui::EndTable();

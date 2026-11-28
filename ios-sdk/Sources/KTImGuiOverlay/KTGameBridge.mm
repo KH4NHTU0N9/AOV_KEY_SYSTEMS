@@ -6,8 +6,6 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
-#include <mach/mach.h>
-#include <libkern/OSCacheControl.h>
 
 namespace ktbridge {
 
@@ -17,19 +15,20 @@ static std::atomic<intptr_t> sUnitySlide{0};
 static std::atomic<uintptr_t> sTextStart{0};
 static std::atomic<size_t> sTextSize{0};
 
+// Exact RVAs extracted from kgvn.app global-metadata.dat (v29) + CodeGenModule methodPointers
 static AntibanVector sVectors[12] = {
-    {9,  "[9]  CChatNetUT::On_Chat_Complaint_NTF", "CChatNetUT", "On_Chat_Complaint_NTF", 0, 0, false},
-    {10, "[10] CmdPkg::get_PrmPlayerCheat", "CmdPkg", "get_PrmPlayerCheat", 0, 0, false},
-    {11, "[11] CSDT_CHEATCMD_DETAIL::get_stCheatPushMsgToFirebase", "CSDT_CHEATCMD_DETAIL", "get_stCheatPushMsgToFirebase", 0, 0, false},
-    {12, "[12] LFrameSyncBattleLogic::SampleAndSendFrameSyncData", "LFrameSyncBattleLogic", "SampleAndSendFrameSyncData", 0, 0, false},
-    {13, "[13] LFramework::get_SynchrReport", "LFramework", "get_SynchrReport", 0, 0, false},
-    {14, "[14] EchoPing::ReportSvrStateToSvr", "EchoPing", "ReportSvrStateToSvr", 0, 0, false},
-    {15, "[15] LobbyMsgHandler::onTriggerSecurityDataReport", "LobbyMsgHandler", "onTriggerSecurityDataReport", 0, 0, false},
-    {16, "[16] LobbyMsgHandler::onGameLoginAntidataEvent", "LobbyMsgHandler", "onGameLoginAntidataEvent", 0, 0, false},
-    {17, "[17] ApolloEventReport::ReportEventPlayerInfo", "ApolloEventReport", "ReportEventPlayerInfo", 0, 0, false},
-    {18, "[18] LFrameSynchr::UpdateFrameLater", "LFrameSynchr", "UpdateFrameLater", 0, 0, false},
-    {19, "[19] LFrameSyncBattleLogic::SendSyncData", "LFrameSyncBattleLogic", "SendSyncData", 0, 0, false},
-    {20, "[20] DualChannelHelper::CheckDeviceInBlackList", "DualChannelHelper", "CheckDeviceInBlackList", 0, 0, false}
+    {9,  "[9]  CChatNetUT::On_Chat_Complaint_NTF",                  "CChatNetUT",            "On_Chat_Complaint_NTF",        0x00f1997c, 0, AntibanState::Pending},
+    {10, "[10] CmdPkg::get_PrmPlayerCheat",                        "CmdPkg",                "get_PrmPlayerCheat",           0x0041f6b4, 0, AntibanState::Pending},
+    {11, "[11] CSDT_CHEATCMD_DETAIL::get_stCheatPushMsgToFirebase","CSDT_CHEATCMD_DETAIL",  "get_stCheatPushMsgToFirebase", 0x008d3138, 0, AntibanState::Pending},
+    {12, "[12] LFrameSyncBattleLogic::SampleAndSendFrameSyncData", "LFrameSyncBattleLogic", "SampleAndSendFrameSyncData",   0x04bf931c, 0, AntibanState::Pending},
+    {13, "[13] LFramework::get_SynchrReport",                      "LFramework",            "get_SynchrReport",             0x04e05a3c, 0, AntibanState::Pending},
+    {14, "[14] EchoPing::ReportSvrStateToSvr",                     "EchoPing",              "ReportSvrStateToSvr",          0x05cc2888, 0, AntibanState::Pending},
+    {15, "[15] LobbyMsgHandler::onTriggerSecurityDataReport",      "LobbyMsgHandler",       "onTriggerSecurityDataReport",  0x0677e2a4, 0, AntibanState::Pending},
+    {16, "[16] LobbyMsgHandler::onGameLoginAntidataEvent",         "LobbyMsgHandler",       "onGameLoginAntidataEvent",     0x0677e424, 0, AntibanState::Pending},
+    {17, "[17] ApolloEventReport::ReportEventPlayerInfo",          "ApolloEventReport",     "ReportEventPlayerInfo",        0x05b78370, 0, AntibanState::Pending},
+    {18, "[18] LFrameSynchr::UpdateFrameLater",                    "LFrameSynchr",          "UpdateFrameLater",             0x04d9a59c, 0, AntibanState::Pending},
+    {19, "[19] LFrameSyncBattleLogic::SendSyncData",               "LFrameSyncBattleLogic", "SendSyncData",                 0x04bf95b8, 0, AntibanState::Pending},
+    {20, "[20] DualChannelHelper::CheckDeviceInBlackList",         "DualChannelHelper",     "CheckDeviceInBlackList",       0x05b7ddd8, 0, AntibanState::Pending}
 };
 
 static void InspectImage(const struct mach_header *mh, intptr_t vmaddr_slide) {
@@ -58,7 +57,6 @@ static void InspectImage(const struct mach_header *mh, intptr_t vmaddr_slide) {
                         cmdPtr += lc->cmdsize;
                     }
                 }
-                InstallAntibanSuppressors();
             }
             break;
         }
@@ -70,6 +68,7 @@ void InstallDyldMonitor() {
     if (!sMonitorInstalled.compare_exchange_strong(expected, true)) {
         return;
     }
+    // Pure C + atomics only inside dyld callback
     _dyld_register_func_for_add_image(InspectImage);
 }
 
@@ -113,57 +112,40 @@ uintptr_t ScanTextPattern(const uint8_t *pattern, const char *mask, size_t lengt
     return 0;
 }
 
-static bool PatchArm64ReturnZero(uintptr_t addr) {
-    if (addr == 0) return false;
-    vm_address_t page = addr & ~static_cast<vm_address_t>(PAGE_SIZE - 1);
-    vm_size_t size = PAGE_SIZE * 2;
-    kern_return_t kr = vm_protect(mach_task_self(), page, size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) return false;
-
-    // mov w0, #0 (0x52800000), ret (0xd65f03c0)
-    uint32_t *target = reinterpret_cast<uint32_t *>(addr);
-    target[0] = 0x52800000;
-    target[1] = 0xd65f03c0;
-
-    vm_protect(mach_task_self(), page, size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    sys_icache_invalidate(reinterpret_cast<void *>(addr), 8);
-    return true;
-}
-
-const AntibanVector *GetAntibanVectors(size_t *outCount) {
-    if (outCount) *outCount = 12;
-    return sVectors;
-}
-
-void InstallAntibanSuppressors() {
+void RefreshAntibanStatus() {
+    uintptr_t textStart = sTextStart.load(std::memory_order_acquire);
+    size_t textSize = sTextSize.load(std::memory_order_acquire);
     uintptr_t base = sUnityBase.load(std::memory_order_acquire);
-    intptr_t slide = sUnitySlide.load(std::memory_order_acquire);
-    if (base == 0) return;
+    if (base == 0 || textStart == 0 || textSize == 0) return;
 
     for (int i = 0; i < 12; ++i) {
         AntibanVector &v = sVectors[i];
-        if (v.active) continue;
+        uintptr_t va = base + v.rva;
+        v.targetVA = va;
 
-        // Try direct symbol resolve first
-        char sym[128];
-        std::snprintf(sym, sizeof(sym), "%s_%s", v.className, v.methodName);
-        void *p = ResolveIL2CPPSymbol(sym);
-        if (!p) {
-            std::snprintf(sym, sizeof(sym), "_%s_%s", v.className, v.methodName);
-            p = ResolveIL2CPPSymbol(sym);
-        }
+        if (va >= textStart && va + 8 <= textStart + textSize) {
+            const uint32_t *insns = reinterpret_cast<const uint32_t *>(va);
+            uint32_t op0 = insns[0];
+            uint32_t op1 = insns[1];
 
-        if (p) {
-            v.targetVA = reinterpret_cast<uintptr_t>(p);
-            v.rva = v.targetVA - base;
-            if (v.index == 10 || v.index == 11 || v.index == 15 || v.index == 16 || v.index == 17 || v.index == 20) {
-                // Suppress telemetry and report transmissions
-                v.active = PatchArm64ReturnZero(v.targetVA);
+            // RET (0xd65f03c0) or MOV W0/X0, #0 + RET (0x52800000 / 0xd2800000 + 0xd65f03c0)
+            if (op0 == 0xd65f03c0 ||
+                ((op0 == 0x52800000 || op0 == 0xd2800000) && op1 == 0xd65f03c0)) {
+                v.state = AntibanState::Suppressed;
+            } else if ((op0 & 0xfc000000) == 0x14000000 || // B immediate trampoline
+                       ((op0 & 0x9f00001f) == 0x90000011 && (insns[2] == 0xd61f0220))) { // ADRP X17; ADD X17; BR X17
+                v.state = AntibanState::Hooked;
             } else {
-                v.active = true;
+                v.state = AntibanState::Monitored;
             }
         }
     }
+}
+
+const AntibanVector *GetAntibanVectors(size_t *outCount) {
+    RefreshAntibanStatus();
+    if (outCount) *outCount = 12;
+    return sVectors;
 }
 
 } // namespace ktbridge
