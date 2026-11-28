@@ -347,8 +347,8 @@ static NSString *const kPrefAlpha = @"ktaov.panel_alpha";
             ImVec2 wSize = ImGui::GetWindowSize();
             _activePanelRect = CGRectMake(wPos.x, wPos.y, wSize.x, wSize.y);
 
-            const char *tabs[] = {"Tổng quan & Key", "Giao diện", "Tiện ích", "GameBridge"};
-            for (int i = 0; i < 4; ++i) {
+            const char *tabs[] = {"Tổng quan & Key", "Giao diện", "Tiện ích", "Bảo vệ (Antiban)", "GameBridge"};
+            for (int i = 0; i < 5; ++i) {
                 if (i > 0) ImGui::SameLine();
                 if (_selectedTab == i) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.74f, 0.97f, 0.9f));
@@ -403,6 +403,39 @@ static NSString *const kPrefAlpha = @"ktaov.panel_alpha";
                 ImGui::TextWrapped("Nguồn catalog: https://raw.githubusercontent.com/KH4NHTU0N9/aov/main/data.json");
                 ImGui::Checkbox("Quick Pill: Aim", &_pillQuickAim);
                 ImGui::Checkbox("Quick Pill: Auto Bán Đồ", &_pillQuickSell);
+            } else if (_selectedTab == 3) {
+                ImGui::Text("Bảo vệ Telemetry & Blacklist (12 vector từ thamkhao)");
+                ImGui::Text("ASLR Unity: 0x%llX", (unsigned long long)ktbridge::GetUnityASLRSlide());
+                if (ImGui::BeginTable("##antiban_tbl", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 190.0f))) {
+                    ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed, 42.0f);
+                    ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("VA (abs)", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+                    ImGui::TableSetupColumn("Trạng thái", ImGuiTableColumnFlags_WidthFixed, 75.0f);
+                    ImGui::TableHeadersRow();
+
+                    size_t count = 0;
+                    const ktbridge::AntibanVector *vecs = ktbridge::GetAntibanVectors(&count);
+                    for (size_t i = 0; i < count; ++i) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::Text("[%d]", vecs[i].index);
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::TextUnformatted(vecs[i].label);
+                        ImGui::TableSetColumnIndex(2);
+                        if (vecs[i].targetVA != 0) {
+                            ImGui::Text("0x%lx", (unsigned long)vecs[i].targetVA);
+                        } else {
+                            ImGui::TextDisabled("NULL");
+                        }
+                        ImGui::TableSetColumnIndex(3);
+                        if (vecs[i].active) {
+                            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f), "Đã triệt tiêu");
+                        } else {
+                            ImGui::TextColored(ImVec4(0.8f, 0.5f, 0.2f, 1.0f), "Chờ Unity");
+                        }
+                    }
+                    ImGui::EndTable();
+                }
             } else {
                 ImGui::Text("UnityFramework: %s", ktbridge::IsUnityFrameworkLoaded() ? "Đã nạp" : "Chưa phát hiện");
                 ImGui::Text("Base Addr: 0x%lx", (unsigned long)ktbridge::GetUnityBaseAddress());

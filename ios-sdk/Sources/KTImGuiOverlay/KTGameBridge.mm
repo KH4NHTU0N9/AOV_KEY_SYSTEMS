@@ -5,6 +5,8 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <mach/mach.h>
+#include <libkern/OSCacheControl.h>
 
 namespace ktbridge {
 
@@ -13,6 +15,21 @@ static std::atomic<uintptr_t> sUnityBase{0};
 static std::atomic<intptr_t> sUnitySlide{0};
 static std::atomic<uintptr_t> sTextStart{0};
 static std::atomic<size_t> sTextSize{0};
+
+static AntibanVector sVectors[12] = {
+    {9,  "[9]  CChatNetUT::On_Chat_Complaint_NTF", "CChatNetUT", "On_Chat_Complaint_NTF", 0, 0, false},
+    {10, "[10] CmdPkg::get_PrmPlayerCheat", "CmdPkg", "get_PrmPlayerCheat", 0, 0, false},
+    {11, "[11] CSDT_CHEATCMD_DETAIL::get_stCheatPushMsgToFirebase", "CSDT_CHEATCMD_DETAIL", "get_stCheatPushMsgToFirebase", 0, 0, false},
+    {12, "[12] LFrameSyncBattleLogic::SampleAndSendFrameSyncData", "LFrameSyncBattleLogic", "SampleAndSendFrameSyncData", 0, 0, false},
+    {13, "[13] LFramework::get_SynchrReport", "LFramework", "get_SynchrReport", 0, 0, false},
+    {14, "[14] EchoPing::ReportSvrStateToSvr", "EchoPing", "ReportSvrStateToSvr", 0, 0, false},
+    {15, "[15] LobbyMsgHandler::onTriggerSecurityDataReport", "LobbyMsgHandler", "onTriggerSecurityDataReport", 0, 0, false},
+    {16, "[16] LobbyMsgHandler::onGameLoginAntidataEvent", "LobbyMsgHandler", "onGameLoginAntidataEvent", 0, 0, false},
+    {17, "[17] ApolloEventReport::ReportEventPlayerInfo", "ApolloEventReport", "ReportEventPlayerInfo", 0, 0, false},
+    {18, "[18] LFrameSynchr::UpdateFrameLater", "LFrameSynchr", "UpdateFrameLater", 0, 0, false},
+    {19, "[19] LFrameSyncBattleLogic::SendSyncData", "LFrameSyncBattleLogic", "SendSyncData", 0, 0, false},
+    {20, "[20] DualChannelHelper::CheckDeviceInBlackList", "DualChannelHelper", "CheckDeviceInBlackList", 0, 0, false}
+};
 
 static void InspectImage(const struct mach_header *mh, intptr_t vmaddr_slide) {
     if (!mh) return;
@@ -40,6 +57,7 @@ static void InspectImage(const struct mach_header *mh, intptr_t vmaddr_slide) {
                         cmdPtr += lc->cmdsize;
                     }
                 }
+                InstallAntibanSuppressors();
             }
             break;
         }
@@ -51,7 +69,6 @@ void InstallDyldMonitor() {
     if (!sMonitorInstalled.compare_exchange_strong(expected, true)) {
         return;
     }
-    // Never invoke ObjC/Swift inside dyld callback; InspectImage uses pure C + atomics only.
     _dyld_register_func_for_add_image(InspectImage);
 }
 
@@ -93,6 +110,59 @@ uintptr_t ScanTextPattern(const uint8_t *pattern, const char *mask, size_t lengt
         }
     }
     return 0;
+}
+
+static bool PatchArm64ReturnZero(uintptr_t addr) {
+    if (addr == 0) return false;
+    vm_address_t page = addr & ~static_cast<vm_address_t>(PAGE_SIZE - 1);
+    vm_size_t size = PAGE_SIZE * 2;
+    kern_return_t kr = vm_protect(mach_task_self(), page, size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) return false;
+
+    // mov w0, #0 (0x52800000), ret (0xd65f03c0)
+    uint32_t *target = reinterpret_cast<uint32_t *>(addr);
+    target[0] = 0x52800000;
+    target[1] = 0xd65f03c0;
+
+    vm_protect(mach_task_self(), page, size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    sys_icache_invalidate(reinterpret_cast<void *>(addr), 8);
+    return true;
+}
+
+const AntibanVector *GetAntibanVectors(size_t *outCount) {
+    if (outCount) *outCount = 12;
+    return sVectors;
+}
+
+void InstallAntibanSuppressors() {
+    uintptr_t base = sUnityBase.load(std::memory_order_acquire);
+    intptr_t slide = sUnitySlide.load(std::memory_order_acquire);
+    if (base == 0) return;
+
+    for (int i = 0; i < 12; ++i) {
+        AntibanVector &v = sVectors[i];
+        if (v.active) continue;
+
+        // Try direct symbol resolve first
+        char sym[128];
+        std::snprintf(sym, sizeof(sym), "%s_%s", v.className, v.methodName);
+        void *p = ResolveIL2CPPSymbol(sym);
+        if (!p) {
+            std::snprintf(sym, sizeof(sym), "_%s_%s", v.className, v.methodName);
+            p = ResolveIL2CPPSymbol(sym);
+        }
+
+        if (p) {
+            v.targetVA = reinterpret_cast<uintptr_t>(p);
+            v.rva = v.targetVA - base;
+            if (v.index == 10 || v.index == 11 || v.index == 15 || v.index == 16 || v.index == 17 || v.index == 20) {
+                // Suppress telemetry and report transmissions
+                v.active = PatchArm64ReturnZero(v.targetVA);
+            } else {
+                v.active = true;
+            }
+        }
+    }
 }
 
 } // namespace ktbridge

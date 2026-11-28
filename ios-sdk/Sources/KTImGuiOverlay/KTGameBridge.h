@@ -5,6 +5,16 @@
 
 namespace ktbridge {
 
+struct AntibanVector {
+    int index;
+    const char *label;
+    const char *className;
+    const char *methodName;
+    uintptr_t targetVA;
+    uintptr_t rva;
+    bool active;
+};
+
 /// Registers a dyld image-add callback using lock-safe atomic writes for UnityFramework.
 void InstallDyldMonitor();
 
@@ -20,5 +30,11 @@ void *ResolveIL2CPPSymbol(const char *symbolName);
 
 /// Searches UnityFramework __TEXT,__text for a masked byte pattern (AOB fallback when symbols are stripped).
 uintptr_t ScanTextPattern(const uint8_t *pattern, const char *mask, size_t length);
+
+/// Returns the 12 telemetry and security vectors extracted from thamkhao.
+const AntibanVector *GetAntibanVectors(size_t *outCount);
+
+/// Installs memory stubs on security report and blacklist verification vectors.
+void InstallAntibanSuppressors();
 
 } // namespace ktbridge
