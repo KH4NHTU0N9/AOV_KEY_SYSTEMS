@@ -1,6 +1,7 @@
 // ios-sdk/Sources/KTImGuiOverlay/KTGameBridge.mm
 #import "KTGameBridge.h"
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
